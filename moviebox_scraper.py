@@ -24,8 +24,8 @@ import urllib.parse
 import urllib.request
 
 TITLE = "MovieBox"
-VERSION = "2.0.0"
-DESCRIPTION = "Movies & Series from themoviebox.xyz (H5 API)"
+VERSION = "3.0.0"
+DESCRIPTION = "Movies & Series from themoviebox.xyz"
 
 USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 "
@@ -37,9 +37,15 @@ TMDB_API_KEY = (
     "\x37\x33\x31\x36"
 )
 
-H5_API = "https://h5-api.aoneroom.com/wefeed-h5api-bff"
-WEB_BFF = "https://h5.aoneroom.com/wefeed-h5-bff/web"
 MOVIEBOX_HOME = "https://themoviebox.xyz"
+
+# Multiple API bases to try
+API_BASES = [
+    "https://h5-api.aoneroom.com/wefeed-h5api-bff",
+    "https://h5.aoneroom.com/wefeed-h5-bff/web",
+    "https://movieboxapp.in/wefeed-h5-bff/web",
+    "https://moviebox.pk/wefeed-h5-bff/web",
+]
 
 _cookiejar = http.cookiejar.CookieJar()
 _opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_cookiejar))
@@ -51,9 +57,16 @@ def _request(url, method="GET", data=None, headers=None):
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
         "Origin": MOVIEBOX_HOME,
+        "Referer": MOVIEBOX_HOME + "/",
         "X-Request-Lang": "en",
         "X-Client-Info": '{"timezone":"Asia/Dhaka"}',
         "X-Source": "playpage_share",
+        "Sec-Ch-Ua": '"Chromium";v="121", "Not?A_Brand";v="24", "Google Chrome";v="121"',
+        "Sec-Ch-Ua-Mobile": "?1",
+        "Sec-Ch-Ua-Platform": '"Android"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
     }
     if headers:
         request_headers.update(headers)
@@ -122,53 +135,91 @@ def _imdb_to_tmdb(imdb_id):
     return None
 
 
-def _try_detail_path(detail_path):
-    url = f"{H5_API}/detail?detailPath={urllib.parse.quote(detail_path, safe='')}"
+def _init_session():
+    for base in API_BASES:
+        if "h5api" in base:
+            continue
+        url = base.replace("/web", "") + "/app/get-latest-app-pkgs?app_name=moviebox"
+        _request(url)
+        break
+
+
+def _search_h5api(keyword, subject_type):
+    base = API_BASES[0]  # h5-api.aoneroom.com
+    url = base + "/subject/search"
+    payload = {
+        "keyword": keyword,
+        "page": 1,
+        "perPage": 15,
+        "subjectType": subject_type,
+    }
+    status, body = _request(url, method="POST", data=payload)
+    if status != 200:
+        return []
+    data = _parse_json(body)
+    # Try both wrapped and unwrapped
+    items = []
+    if isinstance(data, dict):
+        if "items" in data:
+            items = data["items"]
+        elif "data" in data and isinstance(data["data"], dict) and "items" in data["data"]:
+            items = data["data"]["items"]
+    return items
+
+
+def _search_webbff(keyword, subject_type):
+    for base in API_BASES[1:]:
+        url = base + "/subject/search"
+        payload = {
+            "keyword": keyword,
+            "page": 1,
+            "perPage": 15,
+            "subjectType": subject_type,
+        }
+        status, body = _request(url, method="POST", data=payload)
+        if status != 200:
+            continue
+        data = _parse_json(body)
+        unwrapped = _unwrap(data)
+        if isinstance(unwrapped, dict) and "items" in unwrapped:
+            return unwrapped["items"]
+        if isinstance(data, dict) and "items" in data:
+            return data["items"]
+    return []
+
+
+def _try_detail(detail_path):
+    base = API_BASES[0]
+    url = f"{base}/detail?detailPath={urllib.parse.quote(detail_path, safe='')}"
     headers = {"Referer": f"{MOVIEBOX_HOME}/movies/{detail_path}"}
     status, body = _request(url, headers=headers)
     if status != 200:
         return None
     data = _parse_json(body)
-    # H5 API returns data directly (no envelope)
-    subject = data.get("subject") or data.get("data", {}).get("subject")
+    # Try multiple response formats
+    subject = None
+    if isinstance(data, dict):
+        if "subject" in data:
+            subject = data["subject"]
+        elif "data" in data and isinstance(data["data"], dict):
+            subject = data["data"].get("subject")
     if subject and subject.get("subjectId"):
         return {
             "subjectId": subject["subjectId"],
             "detailPath": subject.get("detailPath", detail_path),
             "title": subject.get("title", ""),
+            "hasResource": subject.get("hasResource", False),
         }
     return None
 
 
-def _find_by_title(title, year):
-    # Strategy A: try guessed detail paths
-    slug = _slugify(title)
-    candidates = [slug]
-    if year:
-        candidates.append(f"{slug}-{year}")
-    candidates.append(slug.replace("-", ""))
-
-    for candidate in candidates:
-        result = _try_detail_path(candidate)
-        if result:
-            return result
-
-    # Strategy B: search via Web BFF
-    search_url = f"{WEB_BFF}/subject/search"
-    payload = {
-        "keyword": title,
-        "page": 1,
-        "perPage": 10,
-        "subjectType": 0,
-    }
-    status, body = _request(search_url, method="POST", data=payload)
-    if status == 200:
-        data = _unwrap(_parse_json(body))
-        items = data.get("items", []) if isinstance(data, dict) else []
+def _find_by_title(title, year, subject_type):
+    # Strategy 1: Search H5 API
+    items = _search_h5api(title, subject_type)
+    if items:
         for item in items:
             if not item.get("hasResource"):
                 continue
-            # Verify match
             item_title = item.get("title", "").lower()
             if title.lower() in item_title or item_title in title.lower():
                 return {
@@ -176,7 +227,6 @@ def _find_by_title(title, year):
                     "detailPath": item.get("detailPath", ""),
                     "title": item.get("title", ""),
                 }
-        # Fallback: first result with resource
         for item in items:
             if item.get("hasResource"):
                 return {
@@ -185,13 +235,33 @@ def _find_by_title(title, year):
                     "title": item.get("title", ""),
                 }
 
-    # Strategy C: search with year appended
+    # Strategy 2: Search Web BFF
+    items = _search_webbff(title, subject_type)
+    if items:
+        for item in items:
+            if not item.get("hasResource"):
+                continue
+            item_title = item.get("title", "").lower()
+            if title.lower() in item_title or item_title in title.lower():
+                return {
+                    "subjectId": item["subjectId"],
+                    "detailPath": item.get("detailPath", ""),
+                    "title": item.get("title", ""),
+                }
+        for item in items:
+            if item.get("hasResource"):
+                return {
+                    "subjectId": item["subjectId"],
+                    "detailPath": item.get("detailPath", ""),
+                    "title": item.get("title", ""),
+                }
+
+    # Strategy 3: Search with year appended
     if year:
-        payload["keyword"] = f"{title} {year}"
-        status, body = _request(search_url, method="POST", data=payload)
-        if status == 200:
-            data = _unwrap(_parse_json(body))
-            items = data.get("items", []) if isinstance(data, dict) else []
+        items = _search_h5api(f"{title} {year}", subject_type)
+        if not items:
+            items = _search_webbff(f"{title} {year}", subject_type)
+        if items:
             for item in items:
                 if item.get("hasResource"):
                     return {
@@ -200,10 +270,22 @@ def _find_by_title(title, year):
                         "title": item.get("title", ""),
                     }
 
+    # Strategy 4: Guess detail paths
+    slug = _slugify(title)
+    candidates = [slug]
+    if year:
+        candidates.append(f"{slug}-{year}")
+    candidates.append(slug.replace("-", ""))
+    for candidate in candidates:
+        result = _try_detail(candidate)
+        if result and result.get("hasResource"):
+            return result
+
     return None
 
 
 def _get_stream(subject_id, detail_path, se=0, ep=0):
+    base = API_BASES[0]
     params = urllib.parse.urlencode({
         "subjectId": subject_id,
         "se": str(se),
@@ -211,7 +293,7 @@ def _get_stream(subject_id, detail_path, se=0, ep=0):
         "detailPath": detail_path,
         "streamSignType": "1",
     })
-    url = f"{H5_API}/subject/play?{params}"
+    url = f"{base}/subject/play?{params}"
     headers = {
         "Referer": f"{MOVIEBOX_HOME}/movies/{detail_path}",
         "X-Vip-Restrict": "0",
@@ -220,7 +302,13 @@ def _get_stream(subject_id, detail_path, se=0, ep=0):
     if status != 200:
         return None, None
     data = _parse_json(body)
-    streams = data.get("streams") or data.get("data", {}).get("streams", [])
+    # Try multiple response formats
+    streams = []
+    if isinstance(data, dict):
+        if "streams" in data:
+            streams = data["streams"]
+        elif "data" in data and isinstance(data["data"], dict):
+            streams = data["data"].get("streams", [])
     if not streams:
         return None, None
 
@@ -230,7 +318,6 @@ def _get_stream(subject_id, detail_path, se=0, ep=0):
         except Exception:
             return 0
 
-    # Filter out vipLocked
     available = [s for s in streams if not s.get("vipLocked")]
     if not available:
         available = streams
@@ -240,6 +327,8 @@ def _get_stream(subject_id, detail_path, se=0, ep=0):
 
 
 def get_streams(media_type, media_id, config=None):
+    _init_session()
+
     imdb_id = media_id
     season = episode = None
     if ":" in media_id:
@@ -252,8 +341,9 @@ def get_streams(media_type, media_id, config=None):
 
     title = tmdb_info["title"]
     year = tmdb_info.get("year")
+    subject_type = 1 if media_type == "movie" else 2
 
-    found = _find_by_title(title, year)
+    found = _find_by_title(title, year, subject_type)
     if not found:
         return []
 
