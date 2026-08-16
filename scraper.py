@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 
 TITLE = "Krmzy"
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 DESCRIPTION = "مسلسلات تركية وعربية مترجمة (krmzi.org)"
 
 USER_AGENT = (
@@ -115,8 +115,25 @@ def _abs_url(href):
 
 
 def _normalize(text):
-    """Normaliza texto para comparacao."""
-    return text.lower().replace("مسلسل", "").replace("-", " ").strip()
+    """Normaliza texto para comparacao - remove prefixos comuns."""
+    return text.lower().replace("مسلسل", "").replace("-", " ").replace("قرمزي", "").strip()
+
+
+def _word_overlap_score(query, title):
+    """
+    Calcula pontuacao de sobreposicao de palavras entre query e title.
+    Retorna valor entre 0.0 e 1.0.
+    """
+    q_words = set(w for w in _normalize(query).split() if len(w) >= 2)
+    t_words = set(w for w in _normalize(title).split() if len(w) >= 2)
+
+    if not q_words or not t_words:
+        return 0.0
+
+    intersection = q_words & t_words
+
+    # Pontuacao: proporcao de palavras da query encontradas no titulo
+    return len(intersection) / len(q_words)
 
 
 def search_krmzy(query):
@@ -125,6 +142,7 @@ def search_krmzy(query):
 
     queries_to_try = []
     if isinstance(query, dict):
+        # Prioridade: arabe > ingles > original
         for key in ["arabic_name", "title", "original_name"]:
             val = query.get(key, "")
             if val and val not in queries_to_try:
@@ -134,11 +152,13 @@ def search_krmzy(query):
 
     queries_to_try = [q for q in queries_to_try if q]
 
+    # Estrategia 1: Busca direta no site
     for q in queries_to_try:
         result = _search_single(q)
         if result:
             return result
 
+    # Estrategia 2: Busca na lista de series com pontuacao inteligente
     return _search_in_list(queries_to_try)
 
 
@@ -176,6 +196,10 @@ def _search_single(query):
 
 
 def _search_in_list(queries):
+    """
+    Busca na pagina series-list usando pontuacao de sobreposicao de palavras.
+    Retorna a serie com maior pontuacao se houver match razoavel.
+    """
     status, body = _request(f"{BASE_URL}/series-list/")
     if status != 200:
         return None
@@ -185,26 +209,22 @@ def _search_in_list(queries):
         body,
     )
 
-    for href, title in all_series:
-        if "/series/" not in href:
-            continue
-        title_norm = _normalize(title)
-        for q in queries:
-            q_norm = _normalize(q)
-            q_words = [w for w in q_norm.split() if len(w) > 2]
-            for word in q_words:
-                if word in title_norm:
-                    return _abs_url(href)
+    best_match = None
+    best_score = 0.0
 
-    # Ultimo fallback: procura por substring direta
     for href, title in all_series:
         if "/series/" not in href:
             continue
-        title_norm = _normalize(title)
+
         for q in queries:
-            q_norm = _normalize(q)
-            if q_norm in title_norm or title_norm in q_norm:
-                return _abs_url(href)
+            score = _word_overlap_score(q, title)
+            if score > best_score:
+                best_score = score
+                best_match = href
+
+    # Threshold: pelo menos 30% de overlap OU 2 palavras em comum
+    if best_match and best_score >= 0.25:
+        return _abs_url(best_match)
 
     return None
 
@@ -325,7 +345,6 @@ def unpack_js(html):
         packed_code,
     )
 
-    # Prioridade: hls2 > hls3 > file > video > src
     for pattern in [
         r'["\']?hls2["\']?\s*:\s*["\']([^"\']+)["\']',
         r'["\']?hls3["\']?\s*:\s*["\']([^"\']+)["\']',
@@ -341,37 +360,37 @@ def unpack_js(html):
 
 
 def extract_okru(video_id):
-    """Extrai video do OK.ru embed."""
+    """Extrai video do OK.ru embed com parsing JSON robusto."""
     url = f"https://ok.ru/videoembed/{video_id}"
     status, html = _request(url, headers={"Referer": BASE_URL + "/"})
     if status != 200:
         return None
 
-    # Procura data-options
+    # Metodo 1: data-options como JSON
     opts_match = re.search(r'data-options="([^"]+)"', html)
-    if not opts_match:
-        return None
-
-    opts_str = opts_match.group(1)
-    # Decodifica entidades HTML
-    opts_str = opts_str.replace('&quot;', '"').replace('&amp;', '&')
-
-    # Extrai metadata JSON
-    meta_match = re.search(r'"metadata":"({.*?})"', opts_str)
-    if meta_match:
+    if opts_match:
+        opts_str = opts_match.group(1)
+        opts_str = opts_str.replace('&quot;', '"').replace('&amp;', '&').replace('&#x3D;', '=')
         try:
-            meta_json = meta_match.group(1).replace('\\"', '"')
-            metadata = json.loads(meta_json)
+            opts_json = json.loads(opts_str)
+            flashvars = opts_json.get("flashvars", {})
+            metadata_str = flashvars.get("metadata", "{}")
+            if isinstance(metadata_str, str):
+                metadata = json.loads(metadata_str)
+            else:
+                metadata = metadata_str
             videos = metadata.get("videos", [])
             if videos:
-                # Pega o de maior qualidade
-                best = max(videos, key=lambda v: int(v.get("name", "0").replace("p", "")))
+                def quality_key(v):
+                    name = v.get("name", "0")
+                    return int(name.replace("p", "").replace("P", ""))
+                best = max(videos, key=quality_key)
                 return best.get("url")
         except Exception:
             pass
 
-    # Fallback: procura URLs diretas
-    urls = re.findall(r'https?://[^\s"<>]+\.(?:m3u8|mp4)', opts_str)
+    # Metodo 2: URLs diretas na pagina
+    urls = re.findall(r'https?://[^\s"<>]+\.(?:m3u8|mp4)[^\s"<>]*', html)
     if urls:
         return urls[0]
 
@@ -379,28 +398,42 @@ def extract_okru(video_id):
 
 
 def extract_mailru(public_url):
-    """Extrai video do Cloud Mail.ru public link."""
+    """Extrai video do Cloud Mail.ru com multiplas estrategias."""
     status, html = _request(public_url, headers={"Referer": BASE_URL + "/"})
     if status != 200:
         return None
 
-    # Procura weblink_get na pagina
+    # Metodo 1: weblink_get no HTML
     wlg = re.search(r'"weblink_get".*?\[.*?\{.*?"url":"([^"]+)"', html, re.S)
     if wlg:
         return wlg.group(1).replace("\\/", "/")
 
-    # Procura config JSON
+    # Metodo 2: config JSON
     config = re.search(r'window\.__config__\s*=\s*({.*?});', html, re.S)
     if config:
         try:
             cfg = json.loads(config.group(1))
-            weblink = cfg.get("weblink_get", [{}])[0].get("url")
-            if weblink:
-                return weblink
+            weblinks = cfg.get("weblink_get", [])
+            if weblinks:
+                return weblinks[0].get("url")
         except Exception:
             pass
 
-    # Procura qualquer URL de video
+    # Metodo 3: API direta
+    parsed = urllib.parse.urlparse(public_url)
+    path = parsed.path.strip("/")
+    if path.startswith("public/"):
+        key = path.replace("public/", "")
+        api_url = f"https://cloud.mail.ru/api/v2/file?weblink={key}"
+        s, body = _request(api_url)
+        if s == 200:
+            try:
+                data = json.loads(body)
+                return data.get("body", {}).get("weblink")
+            except Exception:
+                pass
+
+    # Metodo 4: URLs de video diretas
     vids = re.findall(r'https?://[^\s"<>]+\.mp4[^\s"<>]*', html)
     if vids:
         return vids[0]
@@ -408,8 +441,8 @@ def extract_mailru(public_url):
     return None
 
 
-def parse_m3u8_qualities(m3u8_url, referer):
-    """Analisa master.m3u8 e retorna lista de (nome, url, bandwidth)."""
+def parse_m3u8_max_quality(m3u8_url, referer):
+    """Analisa master.m3u8 e retorna APENAS a maior qualidade."""
     try:
         req = urllib.request.Request(
             m3u8_url,
@@ -418,9 +451,11 @@ def parse_m3u8_qualities(m3u8_url, referer):
         with _opener.open(req, timeout=10) as resp:
             content = resp.read().decode("utf-8", errors="replace")
     except Exception:
-        return []
+        return None, None
 
-    qualities = []
+    best_url = None
+    best_bandwidth = 0
+    best_name = "Auto"
     lines = content.split("\n")
     base_url = m3u8_url.rsplit("/", 1)[0] + "/"
 
@@ -438,50 +473,27 @@ def parse_m3u8_qualities(m3u8_url, referer):
                     if not stream_url.startswith("http"):
                         stream_url = base_url + stream_url
 
-                    # Determina nome da qualidade
-                    if bandwidth:
+                    if bandwidth > best_bandwidth:
+                        best_bandwidth = bandwidth
+                        best_url = stream_url
                         if bandwidth >= 4000000:
-                            name = "1080p"
+                            best_name = "1080p"
                         elif bandwidth >= 2000000:
-                            name = "720p"
+                            best_name = "720p"
                         elif bandwidth >= 1000000:
-                            name = "480p"
+                            best_name = "480p"
                         elif bandwidth >= 500000:
-                            name = "360p"
+                            best_name = "360p"
                         else:
-                            name = "240p"
-                    elif resolution:
-                        name = resolution.split("x")[1] + "p"
-                    else:
-                        name = "Auto"
+                            best_name = "240p"
+                    elif resolution and not best_bandwidth:
+                        h = int(resolution.split("x")[1])
+                        if h > best_bandwidth:
+                            best_bandwidth = h
+                            best_url = stream_url
+                            best_name = resolution.split("x")[1] + "p"
 
-                    qualities.append((name, stream_url, bandwidth))
-
-    return qualities
-
-
-def check_working_referer(stream_url):
-    candidates = [
-        "https://qesen.net/",
-        "https://newaat.com/",
-        "https://v.turkvearab.com/",
-        "https://arabveturk.com/",
-        "https://iplayerhls.com/",
-    ]
-
-    for ref in candidates:
-        try:
-            req = urllib.request.Request(
-                stream_url,
-                headers={"User-Agent": USER_AGENT, "Referer": ref},
-            )
-            with _opener.open(req, timeout=10) as resp:
-                if resp.status == 200:
-                    return ref
-        except Exception:
-            continue
-
-    return "https://qesen.net/"
+    return best_name, best_url
 
 
 def _ensure_http(u):
@@ -493,7 +505,6 @@ def _ensure_http(u):
 
 
 def _quality_from_name(name):
-    """Infere qualidade baseada no nome do servidor."""
     name_lower = name.lower()
     if "1080" in name_lower or "fhd" in name_lower:
         return "1080p"
@@ -550,7 +561,6 @@ def get_episode_streams(episode_url):
         if not sid:
             continue
 
-        embed_url = None
         stream_url = None
         server_title = server.get("name", "Unknown")
         is_m3u8 = False
@@ -589,7 +599,6 @@ def get_episode_streams(episode_url):
                 referer = "https://ok.ru/"
 
         elif name in ("pro hd", "prohd", "pro-hd"):
-            # Player React - retorna embed direto
             stream_url = f"https://ebtv.upns.live/#{sid}"
             referer = "https://ebtv.upns.live/"
 
@@ -605,35 +614,15 @@ def get_episode_streams(episode_url):
         if not stream_url:
             continue
 
-        # Se for m3u8, tenta extrair qualidades
+        # Extrai apenas a MAIOR qualidade para m3u8
         if is_m3u8:
-            qualities = parse_m3u8_qualities(stream_url, referer)
-            if qualities:
-                for q_name, q_url, _ in qualities:
-                    headers = {
-                        "User-Agent": USER_AGENT,
-                        "Referer": referer,
-                    }
-                    if referer != BASE_URL + "/":
-                        headers["Origin"] = referer.rstrip("/")
-
-                    streams.append({
-                        "name": TITLE,
-                        "title": f"{server_title} - {q_name}",
-                        "url": q_url,
-                        "behaviorHints": {
-                            "notMyMetadata": True,
-                            "proxyHeaders": {
-                                "request": headers,
-                            },
-                        },
-                    })
-                continue  # Pula adicao generica
+            q_name, q_url = parse_m3u8_max_quality(stream_url, referer)
+            if q_url:
+                stream_url = q_url
+                server_title = f"{server_title} - {q_name}"
             else:
-                # Fallback: usa qualidade do nome do servidor
                 server_title = f"{server_title} - {_quality_from_name(server_title)}"
         else:
-            # Para nao-m3u8, adiciona qualidade inferida
             server_title = f"{server_title} - {_quality_from_name(server_title)}"
 
         headers = {
