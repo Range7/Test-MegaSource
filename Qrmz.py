@@ -29,8 +29,8 @@ import urllib.request
 # METADADOS DO SCRAPER
 # =============================================================================
 TITLE = "Qrmzi.tv"
-VERSION = "3.1.0"
-DESCRIPTION = "Turkish Movies & Series (Arabic) - 1080p Only"
+VERSION = "4.0.0"
+DESCRIPTION = "Turkish Movies & Series (Arabic) - ALL Qualities"
 
 # =============================================================================
 # CONSTANTES
@@ -144,7 +144,7 @@ def _tmdb_arabic_title(tmdb_id, media_type):
 
 
 # =============================================================================
-# LISTAGEM DE TODOS OS CONTEUDOS (Fuzzy Matching)
+# LISTAGEM COMPLETA PARA FUZZY MATCHING
 # =============================================================================
 def _normalize(text):
     """Normaliza texto para comparacao."""
@@ -152,7 +152,7 @@ def _normalize(text):
 
 
 def _word_overlap_score(query, title):
-    """Calcula pontuacao de sobreposicao de palavras entre query e title."""
+    """Calcula pontuacao de sobreposicao de palavras."""
     q_words = set(w for w in _normalize(query).split() if len(w) >= 2)
     t_words = set(w for w in _normalize(title).split() if len(w) >= 2)
     if not q_words or not t_words:
@@ -162,17 +162,12 @@ def _word_overlap_score(query, title):
 
 
 def _load_series_list():
-    """Carrega lista de todas as series do qrmzi.tv para fuzzy matching."""
+    """Carrega lista de todas as series do qrmzi.tv."""
     status, body = _request(f"{BASE_URL}/all-turkish-series/")
     if status != 200:
         return []
-
     results = []
-    # Extrai todos os links de series com seus titulos
-    matches = re.findall(
-        r'<a[^>]*href="([^"]+)"[^>]*title="([^"]+)"[^>]*>',
-        body,
-    )
+    matches = re.findall(r'<a[^>]*href="([^"]+)"[^>]*title="([^"]+)"[^>]*>', body)
     for href, title in matches:
         if "/series/" in href:
             results.append({"url": href, "title": title})
@@ -180,16 +175,12 @@ def _load_series_list():
 
 
 def _load_movies_list():
-    """Carrega lista de todos os filmes do qrmzi.tv para fuzzy matching."""
+    """Carrega lista de todos os filmes do qrmzi.tv."""
     status, body = _request(f"{BASE_URL}/all-turkish-movies/")
     if status != 200:
         return []
-
     results = []
-    matches = re.findall(
-        r'<a[^>]*href="([^"]+)"[^>]*title="([^"]+)"[^>]*>',
-        body,
-    )
+    matches = re.findall(r'<a[^>]*href="([^"]+)"[^>]*title="([^"]+)"[^>]*>', body)
     for href, title in matches:
         if "/movies/" in href:
             results.append({"url": href, "title": title})
@@ -197,7 +188,7 @@ def _load_movies_list():
 
 
 # =============================================================================
-# BUSCA INTELIGENTE NO QRMZI.TV
+# BUSCA INTELIGENTE
 # =============================================================================
 def _search_qrmzi(query, media_type):
     """
@@ -235,7 +226,6 @@ def _search_qrmzi(query, media_type):
             best_score = score
             best_match = item["url"]
 
-    # Threshold: pelo menos 25% de overlap
     if best_match and best_score >= 0.25:
         return best_match
 
@@ -243,29 +233,27 @@ def _search_qrmzi(query, media_type):
 
 
 # =============================================================================
-# NAVEGACAO DE SERIES: PAGINA DA SERIE -> EPISODIO ESPECIFICO
+# NAVEGACAO DE SERIES
 # =============================================================================
 def _get_series_episode_url(series_url, season, episode):
-    """
-    Dado URL da pagina da serie, extrai o URL do episodio especifico.
-    """
+    """Extrai URL do episodio especifico da pagina da serie."""
     status, body = _request(series_url, headers={"Referer": BASE_URL + "/"})
     if status != 200 or not body:
         return None
 
-    # Procura link do episodio: /episode/...-الحلقة-{numero}/
+    # Procura link do episodio
     ep_pattern = r'href=["\'](https?://www\.qrmzi\.tv/episode/[^"\']+-الحلقة-' + str(episode) + r'(?:[-/]|$)[^"\']*)["\']'
     ep_match = re.search(ep_pattern, body, re.S | re.I)
     if ep_match:
         return ep_match.group(1)
 
-    # Fallback: lista todos os episodios e busca pelo numero
+    # Fallback
     all_eps = re.findall(
         r'href=["\'](https?://www\.qrmzi\.tv/episode/[^"\']+-الحلقة-\d+[^"\']*)["\']',
         body, re.S | re.I,
     )
     for ep_url in sorted(set(all_eps)):
-        if f"-الحلقة-{episode}" in ep_url or f"-الحلقة-{episode}/" in ep_url:
+        if f"-الحلقة-{episode}" in ep_url:
             return ep_url
 
     return None
@@ -275,7 +263,7 @@ def _get_series_episode_url(series_url, season, episode):
 # EXTRACAO DO IFRAME ALBAPLAYER
 # =============================================================================
 def _extract_player_iframe(page_url):
-    """Extrai o iframe do AlbaPlayer da pagina do filme/episodio."""
+    """Extrai o iframe do AlbaPlayer."""
     status, body = _request(page_url, headers={"Referer": BASE_URL + "/"})
     if status != 200 or not body:
         return None
@@ -294,7 +282,7 @@ def _extract_player_iframe(page_url):
 
 
 # =============================================================================
-# DECODIFICADOR DE JAVASCRIPT PACKED (proven from krmzi.org)
+# DECODIFICADOR DE JAVASCRIPT PACKED
 # =============================================================================
 def _to_base(num, radix):
     chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -349,11 +337,11 @@ def unpack_js(html):
     )
 
     for pattern in [
+        r'["\']?file["\']?\s*:\s*["\']([^"\']+)["\']',
+        r'["\']?src["\']?\s*:\s*["\']([^"\']+)["\']',
+        r'["\']?video["\']?\s*:\s*["\']([^"\']+)["\']',
         r'["\']?hls2["\']?\s*:\s*["\']([^"\']+)["\']',
         r'["\']?hls3["\']?\s*:\s*["\']([^"\']+)["\']',
-        r'["\']?file["\']?\s*:\s*["\']([^"\']+)["\']',
-        r'["\']?video["\']?\s*:\s*["\']([^"\']+)["\']',
-        r'["\']?src["\']?\s*:\s*["\']([^"\']+)["\']',
         r'sources\s*:\s*\[.*?\{.*?file\s*:\s*["\']([^"\']+)["\']',
     ]:
         m = re.search(pattern, deobfuscated)
@@ -368,101 +356,41 @@ def unpack_js(html):
 # =============================================================================
 def _extract_video_from_embed(embed_url):
     """
-    Acessa a pagina de embed do host de video e extrai o URL direto.
-    Retorna (video_url, is_m3u8) ou (None, False).
+    Acessa embed do host de video e extrai URL direto.
+    Retorna video_url ou None.
     """
     status, body = _request(embed_url, headers={"Referer": "https://w.anaplayer.online/"})
     if status != 200 or not body:
-        return None, False
+        return None
 
-    # Estrategia 1: Decodificar JS packed do JWPlayer
+    # Estrategia 1: Decodificar JS packed
     stream_url = unpack_js(body)
     if stream_url:
-        is_m3u8 = stream_url.endswith(".m3u8")
-        return stream_url, is_m3u8
+        return stream_url
 
-    # Estrategia 2: Fallback pela imagem poster -> guess video URL
+    # Estrategia 2: Qualquer URL .mp4 ou .m3u8 direto no HTML
+    direct = re.search(r'(https?://[^\s"\'<>]+\.(?:mp4|m3u8)[^\s"\'<>]*)', body, re.I)
+    if direct:
+        return direct.group(1)
+
+    # Estrategia 3: Fallback pela imagem poster
     poster = re.search(
         r'<img[^>]+src=["\'](https?://[^"\']+/i/[^"\']+)["\']', body, re.S | re.I
     )
     if poster:
         guess = poster.group(1).replace("/i/", "/v/").replace(".jpg", ".mp4")
-        return guess, False
+        return guess
 
-    # Estrategia 3: Qualquer URL .mp4 ou .m3u8 direto no HTML
-    direct = re.search(r'(https?://[^\s"\'<>]+\.(?:mp4|m3u8)[^\s"\'<>]*)', body, re.I)
-    if direct:
-        url = direct.group(1)
-        return url, url.endswith(".m3u8")
-
-    return None, False
+    return None
 
 
 # =============================================================================
-# ANALISE M3U8 PARA MAIOR QUALIDADE
-# =============================================================================
-def _parse_m3u8_max_quality(m3u8_url, referer):
-    """Analisa master.m3u8 e retorna APENAS a maior qualidade."""
-    try:
-        req = urllib.request.Request(
-            m3u8_url,
-            headers={"User-Agent": USER_AGENT, "Referer": referer},
-        )
-        with _opener.open(req, timeout=10) as resp:
-            content = resp.read().decode("utf-8", errors="replace")
-    except Exception:
-        return None, None
-
-    best_url = None
-    best_bandwidth = 0
-    best_name = "Auto"
-    lines = content.split("\n")
-    base_url = m3u8_url.rsplit("/", 1)[0] + "/"
-
-    for i, line in enumerate(lines):
-        if line.startswith("#EXT-X-STREAM-INF"):
-            bw_match = re.search(r'BANDWIDTH=(\d+)', line)
-            res_match = re.search(r'RESOLUTION=(\d+x\d+)', line)
-
-            bandwidth = int(bw_match.group(1)) if bw_match else 0
-            resolution = res_match.group(1) if res_match else ""
-
-            if i + 1 < len(lines):
-                stream_url = lines[i + 1].strip()
-                if stream_url and not stream_url.startswith("#"):
-                    if not stream_url.startswith("http"):
-                        stream_url = base_url + stream_url
-
-                    if bandwidth > best_bandwidth:
-                        best_bandwidth = bandwidth
-                        best_url = stream_url
-                        if bandwidth >= 4000000:
-                            best_name = "1080p"
-                        elif bandwidth >= 2000000:
-                            best_name = "720p"
-                        elif bandwidth >= 1000000:
-                            best_name = "480p"
-                        elif bandwidth >= 500000:
-                            best_name = "360p"
-                        else:
-                            best_name = "240p"
-                    elif resolution and not best_bandwidth:
-                        h = int(resolution.split("x")[1])
-                        if h > best_bandwidth:
-                            best_bandwidth = h
-                            best_url = stream_url
-                            best_name = resolution.split("x")[1] + "p"
-
-    return best_name, best_url
-
-
-# =============================================================================
-# EXTRACAO DE TODOS OS SERVIDORES DO ALBAPLAYER
+# EXTRACAO DE TODOS OS SERVIDORES
 # =============================================================================
 def _extract_all_servers(player_base_url):
     """
-    Acessa o player AlbaPlayer e extrai iframes de todos os servidores.
-    Retorna lista de dicts com url do video, nome do servidor e qualidade.
+    Acessa todos os servidores do AlbaPlayer e extrai videos.
+    Retorna lista de dicts com url, server name, e quality.
     """
     all_sources = []
 
@@ -475,18 +403,19 @@ def _extract_all_servers(player_base_url):
         "6": "larhu",
     }
 
+    # Garante que a URL base termina com / antes de adicionar parametros
+    if not player_base_url.endswith('/'):
+        player_base_url += '/'
+
     for serv_num, serv_name in server_names.items():
-        if "?" in player_base_url:
-            url = player_base_url + "&serv=" + serv_num
-        else:
-            url = player_base_url + "?serv=" + serv_num
+        url = player_base_url + "?serv=" + serv_num
 
         try:
             status, body = _request(url, headers={"Referer": BASE_URL + "/"})
             if status != 200 or not body:
                 continue
 
-            # Extrai iframe do embed do servidor
+            # Extrai iframe do embed
             iframe = re.search(
                 r'<iframe[^>]+src=["\']([^"\']+)["\'][^>]*>', body, re.S | re.I
             )
@@ -497,28 +426,26 @@ def _extract_all_servers(player_base_url):
             if embed.startswith("//"):
                 embed = "https:" + embed
 
-            # Pula embeds de redes sociais
+            # Pula redes sociais
             if any(x in embed for x in ["vk.com", "ok.ru", "youtube", "dailymotion"]):
                 continue
 
-            video_url, is_m3u8 = _extract_video_from_embed(embed)
+            video_url = _extract_video_from_embed(embed)
             if not video_url:
                 continue
 
-            quality = "1080p"
+            # Normaliza URL
+            if video_url.startswith("//"):
+                video_url = "https:" + video_url
 
-            # Se for m3u8, analisa e pega apenas a maior qualidade
-            if is_m3u8:
-                q_name, q_url = _parse_m3u8_max_quality(video_url, embed)
-                if q_url:
-                    video_url = q_url
-                    quality = q_name
-
-            # ================================================================
-            # فلترة 1080p: نتخطى السيرفرات التي لا تحتوي على 1080p
-            # ================================================================
-            if quality in ("720p", "480p", "360p", "240p"):
-                continue
+            # Detecta qualidade pelo nome do servidor ou URL
+            quality = "HD"
+            if "1080" in video_url.lower():
+                quality = "1080p"
+            elif "720" in video_url.lower():
+                quality = "720p"
+            elif "480" in video_url.lower():
+                quality = "480p"
 
             all_sources.append({
                 "url": video_url,
@@ -537,13 +464,13 @@ def _extract_all_servers(player_base_url):
 # RESOLUCAO DE FILMES
 # =============================================================================
 def _resolve_movie(imdb_id):
-    """Resolve filme: IMDB -> qrmzi.tv -> Player -> Video 1080p."""
+    """Resolve filme."""
     try:
         info = _tmdb_find(imdb_id)
         if not info:
             return []
 
-        # Coleta titulos para busca (arabe eh prioritario)
+        # Tenta buscar com todos os titulos disponiveis
         queries = []
         ar_title = _tmdb_arabic_title(info["tmdb_id"], "movie")
         if ar_title:
@@ -570,13 +497,12 @@ def _resolve_movie(imdb_id):
 # RESOLUCAO DE SERIES
 # =============================================================================
 def _resolve_series(imdb_id, season, episode):
-    """Resolve serie: IMDB -> qrmzi.tv -> episodio -> Player -> Video 1080p."""
+    """Resolve serie."""
     try:
         info = _tmdb_find(imdb_id)
         if not info:
             return []
 
-        # Coleta titulos para busca (arabe eh prioritario)
         queries = []
         ar_title = _tmdb_arabic_title(info["tmdb_id"], "tv")
         if ar_title:
@@ -607,9 +533,7 @@ def _resolve_series(imdb_id, season, episode):
 def get_streams(media_type, media_id, config=None):
     """
     Ponto de entrada do MegaSource.
-
-    media_type: "movie" | "series"
-    media_id: "tt0111161" ou "tt0944947:1:1"
+    Retorna TODOS os streams encontrados - sem filtragem de qualidade.
     """
     imdb_id = media_id
     season = episode = None
@@ -627,14 +551,6 @@ def get_streams(media_type, media_id, config=None):
 
     streams = []
     for src in sources:
-        # ================================================================
-        # فلترة نهائية صارمة: فقط 1080p
-        # ================================================================
-        quality = src.get("quality", "")
-        if not re.search(r"1080[pi]?", quality, re.I):
-            if not re.search(r"1080[pi]?", src.get("url", ""), re.I):
-                continue
-
         streams.append(
             {
                 "name": TITLE,
