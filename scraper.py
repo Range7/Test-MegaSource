@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 
 TITLE = "Krmzy"
-VERSION = "2.3.0"
+VERSION = "2.5.0"
 DESCRIPTION = "مسلسلات تركية وعربية مترجمة (krmzi.org)"
 
 USER_AGENT = (
@@ -83,7 +83,6 @@ def imdb_to_tmdb(imdb_id):
         title = item.get("name", "")
         original = item.get("original_name", "")
 
-        # Tenta obter titulo arabe tambem
         arabic_title = ""
         try:
             detail_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={TMDB_API_KEY}&language=ar"
@@ -115,24 +114,15 @@ def _abs_url(href):
 
 
 def _normalize(text):
-    """Normaliza texto para comparacao - remove prefixos comuns."""
     return text.lower().replace("مسلسل", "").replace("-", " ").replace("قرمزي", "").strip()
 
 
 def _word_overlap_score(query, title):
-    """
-    Calcula pontuacao de sobreposicao de palavras entre query e title.
-    Retorna valor entre 0.0 e 1.0.
-    """
     q_words = set(w for w in _normalize(query).split() if len(w) >= 2)
     t_words = set(w for w in _normalize(title).split() if len(w) >= 2)
-
     if not q_words or not t_words:
         return 0.0
-
     intersection = q_words & t_words
-
-    # Pontuacao: proporcao de palavras da query encontradas no titulo
     return len(intersection) / len(q_words)
 
 
@@ -142,7 +132,6 @@ def search_krmzy(query):
 
     queries_to_try = []
     if isinstance(query, dict):
-        # Prioridade: arabe > ingles > original
         for key in ["arabic_name", "title", "original_name"]:
             val = query.get(key, "")
             if val and val not in queries_to_try:
@@ -152,13 +141,11 @@ def search_krmzy(query):
 
     queries_to_try = [q for q in queries_to_try if q]
 
-    # Estrategia 1: Busca direta no site
     for q in queries_to_try:
         result = _search_single(q)
         if result:
             return result
 
-    # Estrategia 2: Busca na lista de series com pontuacao inteligente
     return _search_in_list(queries_to_try)
 
 
@@ -196,10 +183,6 @@ def _search_single(query):
 
 
 def _search_in_list(queries):
-    """
-    Busca na pagina series-list usando pontuacao de sobreposicao de palavras.
-    Retorna a serie com maior pontuacao se houver match razoavel.
-    """
     status, body = _request(f"{BASE_URL}/series-list/")
     if status != 200:
         return None
@@ -222,7 +205,6 @@ def _search_in_list(queries):
                 best_score = score
                 best_match = href
 
-    # Threshold: pelo menos 30% de overlap OU 2 palavras em comum
     if best_match and best_score >= 0.25:
         return _abs_url(best_match)
 
@@ -360,13 +342,12 @@ def unpack_js(html):
 
 
 def extract_okru(video_id):
-    """Extrai video do OK.ru embed com parsing JSON robusto."""
+    """Tenta extrair video do OK.ru embed. Retorna None se falhar."""
     url = f"https://ok.ru/videoembed/{video_id}"
     status, html = _request(url, headers={"Referer": BASE_URL + "/"})
     if status != 200:
         return None
 
-    # Metodo 1: data-options como JSON
     opts_match = re.search(r'data-options="([^"]+)"', html)
     if opts_match:
         opts_str = opts_match.group(1)
@@ -389,7 +370,6 @@ def extract_okru(video_id):
         except Exception:
             pass
 
-    # Metodo 2: URLs diretas na pagina
     urls = re.findall(r'https?://[^\s"<>]+\.(?:m3u8|mp4)[^\s"<>]*', html)
     if urls:
         return urls[0]
@@ -398,17 +378,15 @@ def extract_okru(video_id):
 
 
 def extract_mailru(public_url):
-    """Extrai video do Cloud Mail.ru com multiplas estrategias."""
+    """Tenta extrair video do Cloud Mail.ru. Retorna None se falhar."""
     status, html = _request(public_url, headers={"Referer": BASE_URL + "/"})
     if status != 200:
         return None
 
-    # Metodo 1: weblink_get no HTML
     wlg = re.search(r'"weblink_get".*?\[.*?\{.*?"url":"([^"]+)"', html, re.S)
     if wlg:
         return wlg.group(1).replace("\\/", "/")
 
-    # Metodo 2: config JSON
     config = re.search(r'window\.__config__\s*=\s*({.*?});', html, re.S)
     if config:
         try:
@@ -419,7 +397,6 @@ def extract_mailru(public_url):
         except Exception:
             pass
 
-    # Metodo 3: API direta
     parsed = urllib.parse.urlparse(public_url)
     path = parsed.path.strip("/")
     if path.startswith("public/"):
@@ -433,7 +410,6 @@ def extract_mailru(public_url):
             except Exception:
                 pass
 
-    # Metodo 4: URLs de video diretas
     vids = re.findall(r'https?://[^\s"<>]+\.mp4[^\s"<>]*', html)
     if vids:
         return vids[0]
@@ -451,7 +427,7 @@ def parse_m3u8_max_quality(m3u8_url, referer):
         with _opener.open(req, timeout=10) as resp:
             content = resp.read().decode("utf-8", errors="replace")
     except Exception:
-        return None, None
+        return None, None, 0
 
     best_url = None
     best_bandwidth = 0
@@ -493,7 +469,7 @@ def parse_m3u8_max_quality(m3u8_url, referer):
                             best_url = stream_url
                             best_name = resolution.split("x")[1] + "p"
 
-    return best_name, best_url
+    return best_name, best_url, best_bandwidth
 
 
 def _ensure_http(u):
@@ -517,12 +493,29 @@ def _quality_from_name(name):
     return "HD"
 
 
+def _quality_rank(title):
+    """Retorna rank numerico da qualidade para ordenacao (maior = melhor)."""
+    t = title.lower()
+    if "1080" in t:
+        return 1080
+    elif "720" in t:
+        return 720
+    elif "480" in t:
+        return 480
+    elif "360" in t:
+        return 360
+    elif "240" in t:
+        return 240
+    elif "hd" in t:
+        return 720
+    return 0
+
+
 def get_episode_streams(episode_url):
     status, body = _request(episode_url)
     if status != 200:
         return []
 
-    # Regex flexivel para fullscreen-clickable
     fs_match = re.search(
         r'<a[^>]*href=["\']([^"\']+)["\'][^>]*class=["\'][^"\']*fullscreen-clickable[^"\']*["\']',
         body,
@@ -565,6 +558,7 @@ def get_episode_streams(episode_url):
         server_title = server.get("name", "Unknown")
         is_m3u8 = False
         referer = BASE_URL + "/"
+        quality_name = _quality_from_name(server_title)
 
         if name in ("arab hd", "arabhd", "arab-hd"):
             embed_url = f"https://v.turkvearab.com/embed-{sid}.html"
@@ -586,21 +580,50 @@ def get_episode_streams(episode_url):
 
         elif name == "express":
             if sid.startswith("http"):
-                if "cloud.mail.ru" in sid or "mail.ru" in sid:
-                    stream_url = extract_mailru(sid)
+                # Se ja for URL direta (m3u8, mp4, ou public link)
+                if sid.endswith(".m3u8") or sid.endswith(".mp4") or ".m3u8" in sid:
+                    # URL direta de video
+                    stream_url = sid
+                    is_m3u8 = sid.endswith(".m3u8") or ".m3u8" in sid
+                elif "cloud.mail.ru" in sid or "mail.ru" in sid:
+                    # Public folder link - tenta extrair
+                    extracted = extract_mailru(sid)
+                    if extracted:
+                        stream_url = extracted
+                        is_m3u8 = extracted.endswith(".m3u8")
+                    else:
+                        # Fallback: retorna URL publica diretamente
+                        # O player do dispositivo pode lidar com ela
+                        stream_url = sid
                 else:
                     stream_url = sid
             else:
                 stream_url = _ensure_http(sid)
 
         elif name == "ok":
-            stream_url = extract_okru(sid)
-            if stream_url:
+            if sid.isdigit():
+                # ID numerico - tenta extrair do embed
+                extracted = extract_okru(sid)
+                if extracted:
+                    stream_url = extracted
+                    referer = "https://ok.ru/"
+                else:
+                    # Fallback: retorna embed URL diretamente
+                    stream_url = f"https://ok.ru/videoembed/{sid}"
+                    referer = "https://ok.ru/"
+            elif sid.startswith("http"):
+                # URL direta
+                stream_url = sid
+                referer = "https://ok.ru/"
+            else:
+                stream_url = f"https://ok.ru/videoembed/{sid}"
                 referer = "https://ok.ru/"
 
         elif name in ("pro hd", "prohd", "pro-hd"):
+            # Player React - retorna embed direto
             stream_url = f"https://ebtv.upns.live/#{sid}"
             referer = "https://ebtv.upns.live/"
+            quality_name = "HD"
 
         elif name in ("red hd", "redhd", "red-hd"):
             embed_url = f"https://iplayerhls.com/e/{sid}"
@@ -616,14 +639,15 @@ def get_episode_streams(episode_url):
 
         # Extrai apenas a MAIOR qualidade para m3u8
         if is_m3u8:
-            q_name, q_url = parse_m3u8_max_quality(stream_url, referer)
+            q_name, q_url, bw = parse_m3u8_max_quality(stream_url, referer)
             if q_url:
                 stream_url = q_url
+                quality_name = q_name
                 server_title = f"{server_title} - {q_name}"
             else:
-                server_title = f"{server_title} - {_quality_from_name(server_title)}"
+                server_title = f"{server_title} - {quality_name}"
         else:
-            server_title = f"{server_title} - {_quality_from_name(server_title)}"
+            server_title = f"{server_title} - {quality_name}"
 
         headers = {
             "User-Agent": USER_AGENT,
@@ -643,6 +667,9 @@ def get_episode_streams(episode_url):
                 },
             },
         })
+
+    # ORDENA por qualidade: maior primeiro
+    streams.sort(key=lambda s: _quality_rank(s["title"]), reverse=True)
 
     return streams
 
