@@ -29,7 +29,7 @@ import urllib.request
 # METADADOS DO SCRAPER
 # =============================================================================
 TITLE = "Qrmzi.tv"
-VERSION = "4.1.0"
+VERSION = "5.0.0"
 DESCRIPTION = "Turkish Movies & Series (Arabic) - 1080p Only"
 
 # =============================================================================
@@ -233,24 +233,21 @@ def _search_qrmzi(query, media_type):
 
 
 # =============================================================================
-# NAVEGACAO DE SERIES - FIX PRINCIPAL
+# NAVEGACAO DE SERIES
 # =============================================================================
 def _get_series_episode_url(series_url, episode):
     """
     Extrai URL do episodio especifico da pagina da serie.
-    FIX: usa regex SIMPLES sem texto arabe (evita bug do Python regex),
-    depois filtra pelo numero no final da URL.
+    Usa regex SIMPLES sem texto arabe (evita bug silencioso do Python regex).
     """
     status, body = _request(series_url, headers={"Referer": BASE_URL + "/"})
     if status != 200 or not body:
         return None
 
-    # Regex simples sem texto arabe - evita bug silencioso do Python
     pattern = r'href=["\'](https?://www\.qrmzi\.tv/episode/[^"\']+)["\']'
     matches = re.findall(pattern, body, re.I)
 
     for m in matches:
-        # Filtra pelo numero do episodio no final da URL: ...-1/ ou ...-1
         if m.rstrip('/').endswith(f'-{episode}'):
             return m
 
@@ -382,10 +379,15 @@ def _extract_video_from_embed(embed_url):
 
 
 # =============================================================================
-# ANALISE M3U8 PARA MAIOR QUALIDADE
+# ANALISE M3U8 - FIX PRINCIPAL: deteccao por RESOLUCAO
 # =============================================================================
 def _parse_m3u8_max_quality(m3u8_url, referer):
-    """Analisa master.m3u8 e retorna APENAS a maior qualidade."""
+    """
+    Analisa master.m3u8 e retorna APENAS a maior qualidade.
+    FIX PRINCIPAL: Usa RESOLUCAO (altura) como indicador primario de qualidade,
+    nao apenas BANDWIDTH. Isso corrige o bug onde 1080p com ~3.4M bandwidth
+    era classificado como 720p.
+    """
     try:
         req = urllib.request.Request(
             m3u8_url,
@@ -397,7 +399,7 @@ def _parse_m3u8_max_quality(m3u8_url, referer):
         return None, None
 
     best_url = None
-    best_bandwidth = 0
+    best_height = 0
     best_name = "Auto"
     lines = content.split("\n")
     base_url = m3u8_url.rsplit("/", 1)[0] + "/"
@@ -405,10 +407,11 @@ def _parse_m3u8_max_quality(m3u8_url, referer):
     for i, line in enumerate(lines):
         if line.startswith("#EXT-X-STREAM-INF"):
             bw_match = re.search(r'BANDWIDTH=(\d+)', line)
-            res_match = re.search(r'RESOLUTION=(\d+x\d+)', line)
+            res_match = re.search(r'RESOLUTION=(\d+x(\d+))', line)
 
             bandwidth = int(bw_match.group(1)) if bw_match else 0
             resolution = res_match.group(1) if res_match else ""
+            height = int(res_match.group(2)) if res_match else 0
 
             if i + 1 < len(lines):
                 stream_url = lines[i + 1].strip()
@@ -416,25 +419,24 @@ def _parse_m3u8_max_quality(m3u8_url, referer):
                     if not stream_url.startswith("http"):
                         stream_url = base_url + stream_url
 
-                    if bandwidth > best_bandwidth:
-                        best_bandwidth = bandwidth
+                    # FIX: Usa altura da resolucao como criterio PRIMARIO
+                    if height > best_height:
+                        best_height = height
                         best_url = stream_url
-                        if bandwidth >= 4000000:
+                        if height >= 1080:
                             best_name = "1080p"
-                        elif bandwidth >= 2000000:
+                        elif height >= 720:
                             best_name = "720p"
-                        elif bandwidth >= 1000000:
+                        elif height >= 480:
                             best_name = "480p"
-                        elif bandwidth >= 500000:
+                        elif height >= 360:
                             best_name = "360p"
                         else:
                             best_name = "240p"
-                    elif resolution and not best_bandwidth:
-                        h = int(resolution.split("x")[1])
-                        if h > best_bandwidth:
-                            best_bandwidth = h
-                            best_url = stream_url
-                            best_name = resolution.split("x")[1] + "p"
+                    # Se altura igual, usa bandwidth como desempate
+                    elif height == best_height and bandwidth > 0:
+                        best_bandwidth = 0  # nao rastreamos bandwidth do best, simplificado
+                        best_url = stream_url
 
     return best_name, best_url
 
@@ -457,7 +459,6 @@ def _extract_all_servers(player_base_url):
         "6": "larhu",
     }
 
-    # Garante URL base correta
     if not player_base_url.endswith('/'):
         player_base_url += '/'
 
@@ -606,14 +607,26 @@ def get_streams(media_type, media_id, config=None):
         sources = _resolve_series(imdb_id, int(season), int(episode))
 
     streams = []
+    has_1080p = False
+
+    # Primeira passagem: verifica se ha 1080p
     for src in sources:
-        # ================================================================
-        # فلترة 1080p نهائية
-        # ================================================================
+        if re.search(r"1080[pi]?", src.get("quality", ""), re.I):
+            has_1080p = True
+            break
+        if re.search(r"1080[pi]?", src.get("url", ""), re.I):
+            has_1080p = True
+            break
+
+    for src in sources:
         quality = src.get("quality", "")
-        if not re.search(r"1080[pi]?", quality, re.I):
-            if not re.search(r"1080[pi]?", src.get("url", ""), re.I):
-                continue
+
+        # Se existe 1080p em ALGUM servidor, filtra apenas 1080p
+        # Se NAO existe 1080p, retorna TUDO para nao ficar vazio
+        if has_1080p:
+            if not re.search(r"1080[pi]?", quality, re.I):
+                if not re.search(r"1080[pi]?", src.get("url", ""), re.I):
+                    continue
 
         streams.append(
             {
