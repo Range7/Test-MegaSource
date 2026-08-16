@@ -14,6 +14,13 @@ media_id : "tt0111161" (filme) | "tt0944947:1:1" (serie:temporada:episodio)
 
 Retorna streams com behaviorHints.proxyHeaders.
 Usa apenas a biblioteca padrao do Python (urllib + cookiejar).
+
+LIMITACAO IMPORTANTE:
+Este scraper depende do TMDB para obter titulos arabes. Se o TMDB nao tiver
+traducao arabe para um serie/filme, e o titulo turco/ingles nao coincidir
+com o titulo arabe no qrmzi.tv, o conteudo NAO sera encontrado.
+Isso eh uma limitacao do site qrmzi.tv (que usa apenas titulos arabes)
+e nao do scraper.
 """
 
 import http.cookiejar
@@ -27,8 +34,8 @@ import urllib.request
 # METADADOS DO SCRAPER
 # =============================================================================
 TITLE = "Qrmzi.tv"
-VERSION = "6.0.0"
-DESCRIPTION = "Turkish Movies & Series (Arabic)"
+VERSION = "7.0.0"
+DESCRIPTION = "Turkish Movies & Series (Arabic) - CDNPlus 1080p"
 
 # =============================================================================
 # CONSTANTES
@@ -45,9 +52,9 @@ _opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_cookie
 
 
 # =============================================================================
-# HTTP HELPER (igual ao krmzi.org)
+# HTTP HELPER
 # =============================================================================
-def _request(url, method="GET", data=None, headers=None):
+def _request(url, method="GET", data=None, headers=None, timeout=10):
     request_headers = {"User-Agent": USER_AGENT}
     if headers:
         request_headers.update(headers)
@@ -61,7 +68,7 @@ def _request(url, method="GET", data=None, headers=None):
 
     req = urllib.request.Request(url, data=body, headers=request_headers, method=method)
     try:
-        with _opener.open(req, timeout=15) as resp:
+        with _opener.open(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", errors="replace")
@@ -70,14 +77,14 @@ def _request(url, method="GET", data=None, headers=None):
 
 
 # =============================================================================
-# TMDB - BUSCA TITULO (igual ao krmzi.org)
+# TMDB
 # =============================================================================
 def imdb_to_tmdb(imdb_id):
     find_url = "https://api.themoviedb.org/3/find/" + urllib.parse.quote(imdb_id)
     query = urllib.parse.urlencode(
         {"api_key": TMDB_API_KEY, "external_source": "imdb_id"}
     )
-    status, body = _request(find_url + "?" + query)
+    status, body = _request(find_url + "?" + query, timeout=10)
     if status != 200:
         return None
     try:
@@ -95,7 +102,7 @@ def imdb_to_tmdb(imdb_id):
         arabic_title = ""
         try:
             detail_url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={TMDB_API_KEY}&language=ar"
-            s2, b2 = _request(detail_url)
+            s2, b2 = _request(detail_url, timeout=10)
             if s2 == 200:
                 detail = json.loads(b2)
                 arabic_title = detail.get("name", "")
@@ -120,7 +127,7 @@ def imdb_to_tmdb(imdb_id):
         arabic_title = ""
         try:
             detail_url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={TMDB_API_KEY}&language=ar"
-            s2, b2 = _request(detail_url)
+            s2, b2 = _request(detail_url, timeout=10)
             if s2 == 200:
                 detail = json.loads(b2)
                 arabic_title = detail.get("title", "")
@@ -139,7 +146,7 @@ def imdb_to_tmdb(imdb_id):
 
 
 # =============================================================================
-# BUSCA NO QRMZI.TV (igual ao krmzi.org)
+# BUSCA NO QRMZI.TV
 # =============================================================================
 def _normalize(text):
     return text.lower().replace("مسلسل", "").replace("فيلم", "").replace("-", " ").replace("  ", " ").strip()
@@ -164,13 +171,35 @@ def _abs_url(href):
     return href
 
 
+def _load_sitemap(media_type):
+    """Carrega sitemap XML do qrmzi.tv (mais rapido e completo que HTML)."""
+    if media_type == "movie":
+        url = f"{BASE_URL}/movies-sitemap.xml"
+    else:
+        url = f"{BASE_URL}/series-sitemap.xml"
+    
+    status, body = _request(url, timeout=10)
+    if status != 200:
+        return []
+    
+    urls = re.findall(r'<loc>([^<]+)</loc>', body)
+    results = []
+    for u in urls:
+        slug = u.split("/")[-2] if u.endswith("/") else u.split("/")[-1]
+        try:
+            title = urllib.parse.unquote(slug)
+        except:
+            title = slug
+        results.append({"url": u, "title": title})
+    return results
+
+
 def search_qrmzi(query_info):
     if not query_info:
         return None
     
     queries_to_try = []
     if isinstance(query_info, dict):
-        # Prioridade: arabe > ingles > original
         for key in ["arabic_name", "title", "original_name", "original_title"]:
             val = query_info.get(key, "")
             if val and val not in queries_to_try:
@@ -180,20 +209,21 @@ def search_qrmzi(query_info):
     
     queries_to_try = [q for q in queries_to_try if q]
     
-    # Estrategia 1: Busca direta
+    # Estrategia 1: Busca direta no site (mais rapida)
     for q in queries_to_try:
         result = _search_single(q)
         if result:
             return result
     
-    # Estrategia 2: Fuzzy matching na lista completa
-    return _search_in_list(queries_to_try)
+    # Estrategia 2: Sitemap fuzzy matching (cobertura total)
+    media_type = query_info.get("type", "tv") if isinstance(query_info, dict) else "tv"
+    return _search_in_sitemap(queries_to_try, media_type)
 
 
 def _search_single(query):
     encoded = urllib.parse.quote(query)
     url = f"{BASE_URL}/?s={encoded}"
-    status, body = _request(url)
+    status, body = _request(url, timeout=10)
     
     if status == 200 and body:
         blocks = re.findall(
@@ -223,40 +253,22 @@ def _search_single(query):
     return None
 
 
-def _search_in_list(queries):
-    media_type = "movie" if any("movie_results" in str(q) for q in queries) else "series"
-    
-    if media_type == "movie":
-        list_url = f"{BASE_URL}/all-turkish-movies/"
-    else:
-        list_url = f"{BASE_URL}/all-turkish-series/"
-    
-    status, body = _request(list_url)
-    if status != 200:
-        return None
-    
-    all_items = re.findall(
-        r'<a[^>]*href="([^"]+)"[^>]*title="([^"]+)"[^>]*>',
-        body,
-    )
+def _search_in_sitemap(queries, media_type):
+    items = _load_sitemap(media_type)
     
     best_match = None
     best_score = 0.0
     
-    for href, title in all_items:
-        if media_type == "movie" and "/movies/" not in href:
-            continue
-        if media_type == "series" and "/series/" not in href:
-            continue
-        
+    for item in items:
         for q in queries:
-            score = _word_overlap_score(q, title)
+            score = _word_overlap_score(q, item["title"])
             if score > best_score:
                 best_score = score
-                best_match = href
+                best_match = item["url"]
     
-    if best_match and best_score >= 0.25:
-        return _abs_url(best_match)
+    # Threshold baixo para maximizar cobertura
+    if best_match and best_score >= 0.15:
+        return best_match
     
     return None
 
@@ -265,15 +277,14 @@ def _search_in_list(queries):
 # NAVEGACAO DE SERIES
 # =============================================================================
 def get_series_page(url):
-    status, body = _request(url)
+    status, body = _request(url, timeout=10)
     if status != 200:
         return None, None
     
-    # Se ja for pagina de serie, retorna ela mesma
     if "/series/" in url:
         return url, body
     
-    # Se for episodio, tenta derivar URL da serie
+    # Deriva URL da serie a partir do episodio
     series_match = re.search(
         r'<div[^>]*class=["\'][^"\']*singleSeries[^"\']*["\'][^>]*>.*?'
         r'<div[^>]*class=["\'][^"\']*info[^"\']*["\'][^>]*>.*?'
@@ -284,7 +295,7 @@ def get_series_page(url):
     if series_match:
         series_url = _abs_url(series_match.group(1))
         if "/series/" in series_url:
-            status2, body2 = _request(series_url)
+            status2, body2 = _request(series_url, timeout=10)
             if status2 == 200:
                 return series_url, body2
     
@@ -338,7 +349,7 @@ def find_episode(series_url, episode):
 
 
 # =============================================================================
-# DECODIFICADOR JS PACKED (igual ao krmzi.org)
+# DECODIFICADOR JS PACKED
 # =============================================================================
 def _to_base(num, radix):
     chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -389,11 +400,11 @@ def unpack_js(html):
     )
 
     for pattern in [
+        r'["\']?file["\']?\s*:\s*["\']([^"\']+)["\']',
+        r'["\']?src["\']?\s*:\s*["\']([^"\']+)["\']',
+        r'["\']?video["\']?\s*:\s*["\']([^"\']+)["\']',
         r'["\']?hls2["\']?\s*:\s*["\']([^"\']+)["\']',
         r'["\']?hls3["\']?\s*:\s*["\']([^"\']+)["\']',
-        r'["\']?file["\']?\s*:\s*["\']([^"\']+)["\']',
-        r'["\']?video["\']?\s*:\s*["\']([^"\']+)["\']',
-        r'["\']?src["\']?\s*:\s*["\']([^"\']+)["\']',
     ]:
         m = re.search(pattern, deobfuscated)
         if m:
@@ -403,12 +414,13 @@ def unpack_js(html):
 
 
 # =============================================================================
-# EXTRACAO DE STREAMS (igual ao krmzi.org)
+# EXTRACAO DE STREAMS - APENAS CDNPLUS
 # =============================================================================
-def get_episode_streams(episode_url):
-    status, body = _request(episode_url)
+def get_cdnplus_stream(page_url):
+    """Extrai APENAS o stream do CDNPlus (servidor 1) em 1080p."""
+    status, body = _request(page_url, timeout=10)
     if status != 200:
-        return []
+        return None
 
     # Extrai iframe do AlbaPlayer
     iframe_match = re.search(
@@ -417,97 +429,134 @@ def get_episode_streams(episode_url):
         re.S | re.I,
     )
     if not iframe_match:
-        return []
+        return None
     
     player_url = iframe_match.group(1)
     if player_url.startswith("//"):
         player_url = "https:" + player_url
     
-    # Garante URL base correta
     if not player_url.endswith('/'):
         player_url += '/'
 
-    servers = [
-        ("1", "CDNPlus"),
-        ("2", "MP4Plus"),
-        ("3", "AnaFast"),
-        ("4", "Vidoba"),
-        ("5", "VidSpeed"),
-        ("6", "larhu"),
-    ]
+    # APENAS CDNPlus (servidor 1)
+    url = player_url + "?serv=1"
+    s, html = _request(url, headers={"Referer": page_url}, timeout=10)
+    if s != 200:
+        return None
+    
+    # Extrai iframe do embed do CDNPlus
+    embed_iframe = re.search(
+        r'<iframe[^>]+src=["\']([^"\']+)["\'][^>]*>',
+        html,
+        re.S | re.I,
+    )
+    if not embed_iframe:
+        return None
+    
+    embed = embed_iframe.group(1)
+    if embed.startswith("//"):
+        embed = "https:" + embed
+    
+    # Extrai video do embed
+    s2, embed_html = _request(embed, headers={"Referer": url}, timeout=10)
+    if s2 != 200:
+        return None
+    
+    stream_url = unpack_js(embed_html)
+    if not stream_url:
+        direct = re.search(r'(https?://[^\s"\'<>]+\.(?:mp4|m3u8)[^\s"\'<>]*)', embed_html, re.I)
+        if direct:
+            stream_url = direct.group(1)
+    
+    if not stream_url:
+        return None
+    
+    if stream_url.startswith("//"):
+        stream_url = "https:" + stream_url
 
-    streams = []
-
-    for serv_num, serv_name in servers:
-        url = player_url + "?serv=" + serv_num
-        s, html = _request(url, headers={"Referer": episode_url})
-        if s != 200:
-            continue
-        
-        # Extrai iframe do embed do servidor
-        embed_iframe = re.search(
-            r'<iframe[^>]+src=["\']([^"\']+)["\'][^>]*>',
-            html,
-            re.S | re.I,
-        )
-        if not embed_iframe:
-            continue
-        
-        embed = embed_iframe.group(1)
-        if embed.startswith("//"):
-            embed = "https:" + embed
-        
-        # Pula redes sociais
-        if any(x in embed for x in ["vk.com", "ok.ru", "youtube", "dailymotion"]):
-            continue
-        
-        # Extrai video do embed
-        s2, embed_html = _request(embed, headers={"Referer": url})
-        if s2 != 200:
-            continue
-        
-        stream_url = unpack_js(embed_html)
-        if not stream_url:
-            # Fallback: procura URL direta
-            direct = re.search(r'(https?://[^\s"\'<>]+\.(?:mp4|m3u8)[^\s"\'<>]*)', embed_html, re.I)
-            if direct:
-                stream_url = direct.group(1)
-        
-        if not stream_url:
-            continue
-        
-        if stream_url.startswith("//"):
-            stream_url = "https:" + stream_url
-
-        # Detecta qualidade pelo URL
-        quality = "HD"
-        if "1080" in stream_url.lower():
-            quality = "1080p"
-        elif "720" in stream_url.lower():
-            quality = "720p"
-        elif "480" in stream_url.lower():
-            quality = "480p"
-        elif "360" in stream_url.lower():
-            quality = "360p"
-
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Referer": embed,
-        }
-
-        streams.append({
-            "name": TITLE,
-            "title": f"{serv_name} - {quality}",
+    # Se for m3u8, analisa e extrai APENAS 1080p
+    if stream_url.endswith(".m3u8"):
+        quality, final_url = _extract_1080p_from_m3u8(stream_url, embed)
+        if final_url:
+            return {
+                "url": final_url,
+                "quality": quality,
+                "referer": embed,
+            }
+        # Se nao achou 1080p, retorna o master.m3u8
+        return {
             "url": stream_url,
-            "behaviorHints": {
-                "notMyMetadata": True,
-                "proxyHeaders": {
-                    "request": headers,
-                },
-            },
-        })
+            "quality": "HD",
+            "referer": embed,
+        }
+    
+    # Se for MP4 direto
+    quality = "HD"
+    if "1080" in stream_url.lower():
+        quality = "1080p"
+    elif "720" in stream_url.lower():
+        quality = "720p"
+    
+    return {
+        "url": stream_url,
+        "quality": quality,
+        "referer": embed,
+    }
 
-    return streams
+
+def _extract_1080p_from_m3u8(m3u8_url, referer):
+    """Analisa master.m3u8 e retorna APENAS a stream de 1080p."""
+    try:
+        req = urllib.request.Request(
+            m3u8_url,
+            headers={"User-Agent": USER_AGENT, "Referer": referer},
+        )
+        with _opener.open(req, timeout=10) as resp:
+            content = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None, None
+
+    best_url = None
+    best_height = 0
+    best_name = "HD"
+    lines = content.split("\n")
+    base_url = m3u8_url.rsplit("/", 1)[0] + "/"
+
+    for i, line in enumerate(lines):
+        if line.startswith("#EXT-X-STREAM-INF"):
+            res_match = re.search(r'RESOLUTION=\d+x(\d+)', line)
+            if not res_match:
+                continue
+            
+            height = int(res_match.group(1))
+            
+            if i + 1 < len(lines):
+                stream_url = lines[i + 1].strip()
+                if stream_url and not stream_url.startswith("#"):
+                    if not stream_url.startswith("http"):
+                        stream_url = base_url + stream_url
+                    
+                    # Prioridade: 1080p exato
+                    if height == 1080:
+                        return "1080p", stream_url
+                    
+                    # Fallback: maior qualidade disponivel
+                    if height > best_height:
+                        best_height = height
+                        best_url = stream_url
+                        if height >= 1080:
+                            best_name = "1080p"
+                        elif height >= 720:
+                            best_name = "720p"
+                        elif height >= 480:
+                            best_name = "480p"
+                        else:
+                            best_name = "360p"
+
+    if best_url:
+        return best_name, best_url
+    
+    return None, None
 
 
 # =============================================================================
@@ -526,8 +575,11 @@ def get_streams(media_type, media_id, config=None):
         if not movie_url:
             return []
         
-        # Para filmes, a pagina do filme contem o iframe diretamente
-        return get_episode_streams(movie_url)
+        stream = get_cdnplus_stream(movie_url)
+        if not stream:
+            return []
+        
+        return [_format_stream(stream)]
     
     elif media_type == "series":
         if ":" not in media_id:
@@ -555,6 +607,35 @@ def get_streams(media_type, media_id, config=None):
         if not episode_url:
             return []
         
-        return get_episode_streams(episode_url)
+        stream = get_cdnplus_stream(episode_url)
+        if not stream:
+            return []
+        
+        return [_format_stream(stream)]
     
     return []
+
+
+def _format_stream(stream):
+    """Formata stream no padrao MegaSource com headers otimizados."""
+    referer = stream["referer"]
+    origin = referer.rsplit("/", 1)[0] if "/" in referer else referer
+    
+    return {
+        "name": TITLE,
+        "title": f"CDNPlus - {stream['quality']}",
+        "url": stream["url"],
+        "behaviorHints": {
+            "notMyMetadata": True,
+            "proxyHeaders": {
+                "request": {
+                    "User-Agent": USER_AGENT,
+                    "Referer": referer,
+                    "Origin": origin,
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "identity",
+                }
+            },
+        },
+    }
